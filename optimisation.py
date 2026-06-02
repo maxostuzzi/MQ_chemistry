@@ -11,9 +11,6 @@ and
 
 Minimize objective_f(k,a,b, n, m, q).
 
-Usage:
-    python optimize_kab_cached.py --n 100 --m 20 --q 5 --workers 4
-
 This version parallelizes the outer k-loop using multiprocessing.Pool
 and uses a shared Manager().dict() cache so that expensive
 MQEstimator.estimate() calls are computed once and reused across
