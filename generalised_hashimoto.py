@@ -1,4 +1,33 @@
 #!/usr/bin/env python3
+"""
+Brute-force search for k,a,b that satisfy:
+  0 <= k <= m
+  0 <= a <= m-k
+  0 <= b <= m-k-a
+and
+  CONSTR1(k,a,b) <= n
+  CONSTR2(k,a,b) <= n
+  CONSTR3(k,a,b) <= n
+
+Minimize objective_f(k,a,b, n, m, q).
+
+Usage:
+    python optimize_kab_cached.py --n 100 --m 20 --q 5 --workers 4
+
+This version parallelizes the outer k-loop using multiprocessing.Pool
+and uses a shared Manager().dict() cache so that expensive
+MQEstimator.estimate() calls are computed once and reused across
+worker processes.
+
+Notes / caveats:
+- The shared cache (Manager.dict) reduces duplicate MQEstimator calls
+  across processes, but it still has IPC overhead. For very small
+  problems the overhead may outweigh the parallel speedup.
+- If MQEstimator is not thread/process-safe for some inputs, you may
+  want to run with --workers 1 (serial) instead.
+- The script falls back to a single-process lru_cache when running
+  without multiprocessing.
+"""
 
 from __future__ import annotations
 import argparse
@@ -20,6 +49,24 @@ except Exception:
         return iterable
     HAVE_TQDM = False
 
+# -------------------------
+# === USER: replace these ===
+# -------------------------
+def CONSTR1(k: int, l: int, a: int, b: int, m: int) -> float:
+    """
+    Return the left-hand side of constraint 1.
+    Must be <= n to satisfy.
+    Replace the example below with your real expression.
+    """
+    # EXAMPLE placeholder (replace):
+    return (m - a - b - k) * (a + b + l + 1)
+
+
+def CONSTR3(k: int, l: int, a: int, b: int, m: int) -> float:
+    """Replace with your actual constraint 3 expression."""
+    # EXAMPLE placeholder (replace):
+    return a * (m - a - b - k) + b * (m - k - b) + m - k
+
 def filter(n, m, k, l, b):
     B = sum(b)
     if n - (m - B - k) < (m - B - k) * (B + l):
@@ -27,6 +74,15 @@ def filter(n, m, k, l, b):
     if n - m < sum(b[j] * (m - sum(b[i] for i in range(0, j + 1)) - k) for j in range(len(b))):
         return False
     return True
+
+# -------------------------
+# CACHING helpers
+# We provide two modes for obtaining MQEstimator estimates:
+#  - a process-local lru_cache (fast, used in serial mode)
+#  - a shared Manager.dict based cache (used in multiprocessing mode)
+# The objective_f will call mq_estimate_time() which selects the
+# appropriate backend depending on whether a shared cache is available.
+# -------------------------
 
 # process-local cache (for serial runs)
 @lru_cache(maxsize=None)
@@ -57,6 +113,8 @@ def init_worker(shared_cache, shared_lock):
 
 
 def mq_estimate_time_cached_shared(q: int, m_: int, n_: int) -> float:
+    """Look up or compute the MQEstimator estimate using a Manager.dict()."""
+    # same quick checks to avoid constructing MQEstimator unnecessarily
     if m_ <= 0:
         return 0.0
     if m_ in (1, 2) or n_ in (1, 2):
@@ -86,9 +144,32 @@ def mq_estimate_time_cached_shared(q: int, m_: int, n_: int) -> float:
 
 
 def mq_estimate_time(q: int, m_: int, n_: int) -> float:
+    """Public interface: use shared cache if available (multiprocessing), else use local cache."""
     if SHARED_CACHE is not None:
         return mq_estimate_time_cached_shared(q, m_, n_)
     return mq_estimate_time_cached(q, m_, n_)
+
+def cost_quadratic(n):
+    '''
+    Returns [# field mult, # field add] for matrix vector multiplication u**tAu
+    '''
+    return [n * (n+1)/2 + n, n * (n-1)/2 + n - 1]
+
+def cost_inner_prod(n):
+    '''
+    Returns [# of field multiplications, # of field additions] to perform an inner-product between two n-dim vectors.
+    '''
+    return [n, n - 1]
+
+def cost_matrix_vector(n,m):
+    return [n * m, n * (m - 1)]
+
+def polynomial_factors(n,m,q,k,l,bs):
+    cost = 0
+    for i in range(len(bs)):
+        B = sum(bs[:i]) + k
+        cost += sum(cost_quadratic(B)) + sum(cost_matrix_vector(m - B, B)) + sum(cost_inner_prod(m))
+    return cost
 
 
 def objective_f(n,m,q,k,l,bs):
@@ -113,12 +194,20 @@ def objective_f(n,m,q,k,l,bs):
         costs['over'] = 1
     else:
         costs['over'] = mq_estimate_time(q, m - B - l, m - B - k - l)
-    return math.log2((m - B - k) * 2**costs[B+l] + sum((m - Bs[i] - k) * 2**costs[Bs[i]] for i in range(0,len(bs) - 1)) + q**k * (2**costs['over'] + sum(2**costs[b] for b in bs)))
+    return math.log2((m - B - k) * 2**costs[B+l] + sum((m - Bs[i] - k) * 2**costs[Bs[i]] for i in range(0,len(bs) - 1)) + q**k * (2**costs['over'] + sum(2**costs[b] for b in bs) + polynomial_factors(n,m,q,k,l,bs)))
 
+
+
+# -------------------------
+# === end replacements ===
+# -------------------------
 
 def tuples_sum_leq(m_kl: int, p: int) -> Iterator[List[int]]:
-
+    """Yield all lists of p nonnegative integers whose sum <= m.
+       Example: list(tuples_sum_leq(2, 2)) -> [[0,0],[0,1],[0,2],[1,0],[1,1],[2,0]]
+    """
     if p <= 0:
+        # if user insists p==0 you get one empty tuple if m>=0
         if p == 0:
             yield []
         return
@@ -183,7 +272,7 @@ def worker_for_k(args_tuple):
             if val < best_value:
                 best_value = val
                 best_solutions = [(k, l, bs)]
-                # print(f"New best {best_value} at (k,l,bs)=({k},{l},{bs})", file=sys.stderr)
+                print(f"New best {best_value} at (k,l,bs)=({k},{l},{bs})", file=sys.stderr)
             elif val == best_value:
                 best_solutions.append((k, l, bs))
     return k, best_value, best_solutions
@@ -199,8 +288,9 @@ def search_bruteforce_parallel(n: int, m: int, q: int, p: int, tobeat: int, work
     shared_lock = manager.Lock()
 
     # prepare work items
-    ks = [(k, n, m, q, p) for k in range(15, math.ceil(tobeat/math.log2(q)))]
-    # ks = [(k, n, m, q, p) for k in range(32, 40)]
+    # ks = [(k, n, m, q, p) for k in range(30, math.ceil(tobeat/math.log2(q)))]
+    ks = [(k, n, m, q, p) for k in range(10, math.ceil(tobeat/math.log2(q)))]
+    # ks = [(k, n, m, q, p) for k in range(math.ceil(tobeat/math.log2(q)))]
 
     best_value = math.inf
     best_solutions: List[Tuple[int,int,list]] = []
@@ -224,14 +314,14 @@ def search_bruteforce_parallel(n: int, m: int, q: int, p: int, tobeat: int, work
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Brute-force search for k,l,bs minimizing objective subject to constraints.")
-    parser.add_argument("--n", type=int, required=True, help="Constraint RHS (n)")
-    parser.add_argument("--m", type=int, required=True, help="Upper bound parameter (m)")
-    parser.add_argument("--q", type=int, required=True)
-    parser.add_argument("--p", type=int, required=True)
-    parser.add_argument("--tobeat", type=int, required=True)
+    parser.add_argument("-n", type=int, required=True, help="Constraint RHS (n)")
+    parser.add_argument("-m", type=int, required=True, help="Upper bound parameter (m)")
+    parser.add_argument("-q", type=int, required=True)
+    parser.add_argument("-p", type=int, required=True)
+    parser.add_argument("-tobeat", type=int, required=True)
     parser.add_argument("--all-ties", action="store_true", help="Return all tied best solutions instead of just one")
     parser.add_argument("--verbose", action="store_true", help="Print progress/updating messages")
-    parser.add_argument("--workers", type=int, default=1, help="Number of worker processes for parallel k-loop (default 1 = serial)")
+    parser.add_argument("-workers", type=int, default=1, help="Number of worker processes for parallel k-loop (default 1 = serial)")
     return parser.parse_args()
 
 
@@ -255,7 +345,9 @@ def main():
         print("No feasible (k,l,a,b) found that satisfies all constraints.")
         return
 
+    # By default, if user didn't ask for all ties, show one canonical best (e.g., smallest lexicographic)
     if not args.all_ties:
+        # pick lexicographically smallest (k,a,b) among ties
         chosen = min(best_sols)
         print(f"Best objective value: {best_value}")
         print(f"Chosen (k,l,a,b): {chosen}")
