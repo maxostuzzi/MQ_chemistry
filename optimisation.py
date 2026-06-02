@@ -46,22 +46,17 @@ except Exception:
         return iterable
     HAVE_TQDM = False
 
-# -------------------------
-# === USER: replace these ===
-# -------------------------
 def CONSTR1(k: int, l: int, a: int, b: int, m: int) -> float:
     """
     Return the left-hand side of constraint 1.
     Must be <= n to satisfy.
     Replace the example below with your real expression.
     """
-    # EXAMPLE placeholder (replace):
     return (m - a - b - k) * (a + b + l + 1)
 
 
 def CONSTR3(k: int, l: int, a: int, b: int, m: int) -> float:
     """Replace with your actual constraint 3 expression."""
-    # EXAMPLE placeholder (replace):
     return a * (m - a - b - k) + b * (m - k - b) + m - k
 
 def filter(n, m, k, l, b):
@@ -193,11 +188,6 @@ def objective_f(n,m,q,k,l,bs):
         costs['over'] = mq_estimate_time(q, m - B - l, m - B - k - l)
     return math.log2((m - B - k) * 2**costs[B+l] + sum((m - Bs[i] - k) * 2**costs[Bs[i]] for i in range(0,len(bs) - 1)) + q**k * (2**costs['over'] + sum(2**costs[b] for b in bs) + polynomial_factors(n,m,q,k,l,bs)))
 
-
-
-# -------------------------
-# === end replacements ===
-# -------------------------
 
 def tuples_sum_leq(m_kl: int, p: int) -> Iterator[List[int]]:
     """Yield all lists of p nonnegative integers whose sum <= m.
